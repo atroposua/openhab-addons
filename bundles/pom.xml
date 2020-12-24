@@ -514,6 +514,7 @@
     <module>org.openhab.binding.smartmeter</module>
         
     <module>org.openhab.binding.smhi</module>
+    <module>org.openhab.binding.snapcast</module>
         
     <module>org.openhab.binding.smartthings</module>
         
