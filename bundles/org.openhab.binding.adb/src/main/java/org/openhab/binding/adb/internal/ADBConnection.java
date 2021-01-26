@@ -58,6 +58,7 @@ public class ADBConnection {
             String output = shell("echo ping");
             return (output != null && output.trim().contains("ping"));
         } catch (Exception ex) {
+            logger.error(ex.toString());
             return false;
         }
     }
@@ -108,6 +109,7 @@ public class ADBConnection {
                             return new String(b);
 
                         } catch (Exception ex) {
+                            logger.error(ex.toString());
                             return null;
                         } finally {
                             stream.close();
@@ -125,6 +127,7 @@ public class ADBConnection {
                     executor.execute(request);
                     return request.get(5000, TimeUnit.MILLISECONDS);
                 } catch (Exception e) {
+                    logger.error(e.toString());
                     return null;
                 } finally {
                     if (request != null && !request.isDone()) {
@@ -136,6 +139,7 @@ public class ADBConnection {
                 }
             }
         } catch (Exception ex) {
+            logger.error(ex.toString());
             return null;
         }
     }

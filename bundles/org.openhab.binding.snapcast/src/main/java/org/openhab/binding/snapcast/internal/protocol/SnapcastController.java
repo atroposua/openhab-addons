@@ -1,74 +1,419 @@
-/*
- * Copyright 2017 Steffen Folman Sørensen
+/**
+ * Copyright (c) 2010-2019 Contributors to the openHAB project
  *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
+ * See the NOTICE file(s) distributed with this work for additional
+ * information.
  *
- *     http://www.apache.org/licenses/LICENSE-2.0
+ * This program and the accompanying materials are made available under the
+ * terms of the Eclipse Public License 2.0 which is available at
+ * http://www.eclipse.org/legal/epl-2.0
  *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
+ * SPDX-License-Identifier: EPL-2.0
  */
-
 package org.openhab.binding.snapcast.internal.protocol;
 
+import java.io.BufferedReader;
 import java.io.IOException;
-import java.util.ArrayList;
-import java.util.Collection;
-import java.util.Collections;
+import java.io.InputStreamReader;
+import java.net.InetSocketAddress;
+import java.net.Socket;
+import java.net.SocketException;
 import java.util.HashMap;
-import java.util.List;
-import java.util.Map;
+import java.util.Random;
+import java.util.function.Consumer;
 
-import org.openhab.binding.snapcast.internal.rpc.JsonRpcEventClient;
-import org.openhab.binding.snapcast.internal.types.Client;
-import org.openhab.binding.snapcast.internal.types.ServerStatus;
-import org.openhab.binding.snapcast.internal.types.Stream;
+import org.eclipse.jdt.annotation.NonNull;
+import org.eclipse.jdt.annotation.NonNullByDefault;
+import org.eclipse.jdt.annotation.Nullable;
+import org.openhab.binding.snapcast.internal.data.Identifiable;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
+import com.google.gson.Gson;
+import com.google.gson.JsonElement;
+
+/**
+ * Main snapcast handler
+ *
+ * @author Steffen Brandemann - Initial contribution
+ */
+@NonNullByDefault
 public class SnapcastController {
-    private final JsonRpcEventClient client;
-    private final Map<String, Client> clientMap = new HashMap<>();
-    private final Map<String, Stream> streamMap = new HashMap<>();
-    private final List<SnapcastUpdateListener> updateListeners = new ArrayList<>();
-    private ServerStatus serverStatus;
 
-    public SnapcastController(JsonRpcEventClient client) {
-        this.client = client;
+    private final Logger logger = LoggerFactory.getLogger(SnapcastController.class);
+
+    private final Gson gson = new Gson();
+    private final Random requestId = new Random();
+
+    private final HashMap<String, @Nullable HandlerRef<?>> notifyHandlers = new HashMap<>();
+    private final HashMap<Integer, @Nullable HandlerRef<?>> responseHandlers = new HashMap<>();
+
+    private final ServerController serverController;
+    private final ClientController clientController;
+    private final GroupController groupController;
+    private final StreamController streamController;
+
+    private @Nullable SocketHandler socketHandler;
+
+    public SnapcastController() {
+        serverController = new ServerController(this);
+        clientController = new ClientController(this);
+        groupController = new GroupController(this);
+        streamController = new StreamController(this);
     }
 
-    public void connect() throws IOException, InterruptedException {
-        client.addNotificationHandler(new SnapcastMethodClientOnConnect(clientMap, this));
-        client.addNotificationHandler(new SnapcastMethodClientOnDisconnect(clientMap, this));
-        client.addNotificationHandler(new SnapcastMethodClientOnUpdate(clientMap, this));
-        client.connect();
-        serverStatus = client.sendRequestAndReadResponse("Server.GetStatus", null, ServerStatus.class);
-        serverStatus.getClients().forEach(c -> clientMap.put(c.getHost().getMac(), c));
-        serverStatus.getStreams().forEach(s -> streamMap.put(s.getId(), s));
+    /**
+     * open a connection to the snapcast server
+     *
+     * @param host host of the snapcast server
+     * @param port port of the snapcast server
+     */
+    public void connect(String host, Integer port) {
+        logger.debug("open snapcast connection");
+        synchronized (this) {
+            if (socketHandler == null) {
+                SocketHandler sh = this.socketHandler = new SocketHandler(host, port);
+                try {
+                    sh.openSocket();
+                } catch (IOException e) {
+                    serverController.disconnected();
+                }
+                sh.start();
+            }
+        }
     }
 
+    /**
+     * close the connection to the snapcast server
+     */
+    public void dispose() {
+        logger.debug("dispose snapcast connection");
+        synchronized (this) {
+            SocketHandler sh = this.socketHandler;
+            if (sh != null) {
+                this.socketHandler = null;
+                sh.interrupt();
+            }
+        }
+    }
+
+    /**
+     * Returns the server controller
+     *
+     * @return server controller
+     */
+    public ServerController serverController() {
+        return serverController;
+    }
+
+    /**
+     * Returns the client controller
+     *
+     * @return client controller
+     */
+    public ClientController clientController() {
+        return clientController;
+    }
+
+    /**
+     * Returns the group controller
+     *
+     * @return group controller
+     */
+    public GroupController groupController() {
+        return groupController;
+    }
+
+    /**
+     * Returns the stream controller
+     *
+     * @return stream controller
+     */
+    public StreamController streamController() {
+        return streamController;
+    }
+
+    /**
+     * Register a listener for a notification method
+     *
+     * @param method Name of the method
+     * @param notifyType Type of the notification parameters
+     * @param notifyHandler Handler for processing the notification
+     */
+    public <T> void registerNotifyListener(String method, Class<T> notifyType, Consumer<T> notifyHandler) {
+        final HandlerRef<T> handlerRef = new HandlerRef<>(notifyType, notifyHandler);
+
+        synchronized (notifyHandlers) {
+            notifyHandlers.put(method, handlerRef);
+        }
+    }
+
+    /**
+     * Send a request to the snapcast server
+     *
+     * @param method Name of the method
+     * @param responseType Type of the response parameters
+     * @param responseHandler Handler for processing the response
+     */
+    public <T> void sendRequest(String method, Class<T> responseType, Consumer<T> responseHandler) {
+        sendRequest(method, null, responseType, responseHandler);
+    }
+
+    /**
+     * Send a request to the snapcast server
+     *
+     * @param method Name of the method
+     * @param params Data to send
+     * @param responseType Type of the response parameters
+     * @param responseHandler Handler for processing the response
+     */
+    public <T> void sendRequest(String method, @Nullable Identifiable params, Class<T> responseType,
+            Consumer<T> responseHandler) {
+        final HandlerRef<T> handlerRef = new HandlerRef<>(responseType, responseHandler, params);
+
+        int id;
+        synchronized (responseHandlers) {
+            do {
+                id = requestId.nextInt(Integer.MAX_VALUE);
+            } while (responseHandlers.containsKey(id));
+            responseHandlers.put(id, handlerRef);
+        }
+
+        OutputMessage<Object> msg = new OutputMessage<>();
+        msg.id = id;
+        msg.jsonrpc = "2.0";
+        msg.method = method;
+        msg.params = params;
+
+        SocketHandler sh = this.socketHandler;
+        if (sh != null) {
+            sh.write(gson.toJson(msg));
+        }
+    }
+
+    /**
+     * Snapcast connection handler
+     *
+     * @author Steffen Brandemann - Initial contribution
+     */
+    private class SocketHandler extends Thread {
+
+        private final String host;
+        private final Integer port;
+
+        private @Nullable Socket socket;
+
+        public SocketHandler(String host, Integer port) {
+            this.host = host;
+            this.port = port;
+        }
+
+        @Override
+        public void run() {
+            boolean running = true;
+            while (running && !isInterrupted()) {
+                try {
+                    final Socket socket;
+                    synchronized (SocketHandler.this) {
+                        socket = this.socket;
+                    }
+                    if (socket != null && socket.isConnected() && !socket.isClosed()) {
+                        try {
+                            String msg;
+                            BufferedReader reader = new BufferedReader(new InputStreamReader(socket.getInputStream()));
+                            while ((msg = reader.readLine()) != null) {
+                                parseInputMessage(msg);
+                            }
+                        } catch (SocketException e) {
+                            final String message = e.getMessage();
+                            if (message == null || !message.equals("Socket closed")) {
+                                throw e;
+                            }
+                        } finally {
+                            serverController.disconnected();
+                            closeSocket();
+                        }
+                    } else {
+                        try {
+                            openSocket();
+                        } catch (IOException e) {
+                            Thread.sleep(5000);
+                        }
+                    }
+                } catch (InterruptedException e) {
+                    running = false;
+                } catch (IOException e) {
+                    logger.error("snapcast connection error", e);
+                }
+            }
+        }
+
+        @Override
+        public void interrupt() {
+            try {
+                closeSocket();
+            } catch (IOException e) {
+            }
+            super.interrupt();
+        }
+
+        /**
+         * send the message
+         *
+         * @param msg the message
+         */
+        public void write(String msg) {
+            logger.trace("send: {}", msg);
+            byte[] data = (msg + "\r\n").getBytes();
+            try {
+                synchronized (SocketHandler.this) {
+                    Socket socket = this.socket;
+                    if (socket != null && socket.isConnected() && !socket.isClosed()) {
+                        socket.getOutputStream().write(data);
+                    }
+                }
+            } catch (IOException e) {
+                logger.error("error while send message", e);
+            }
+        }
+
+        /**
+         * open the socket
+         *
+         * @throws IOException
+         */
+        public void openSocket() throws IOException {
+            logger.debug("try to connect to {}:{}...", host, port);
+
+            final Socket socket;
+            synchronized (SocketHandler.this) {
+                socket = this.socket = new Socket();
+                socket.connect(new InetSocketAddress(host, port));
+            }
+            if (socket.isConnected()) {
+                serverController.connected();
+            }
+        }
+
+        /**
+         * close the socket
+         *
+         * @throws IOException
+         */
+        public void closeSocket() throws IOException {
+            final Socket socket;
+            synchronized (SocketHandler.this) {
+                socket = this.socket;
+                if (socket != null && socket.isConnected()) {
+                    socket.close();
+                }
+            }
+        }
+
+        private void parseInputMessage(String msg) {
+            logger.trace("recv: {}", msg);
+
+            InputMessage json = gson.fromJson(msg, InputMessage.class);
+
+            final String method;
+            final Integer id;
+
+            if ((method = json.method) != null && json.params != null) {
+                callNotifyHandler(method, (@NonNull JsonElement) json.params);
+            } else if ((id = json.id) != null && json.result != null) {
+                callResponseHandler(id, (@NonNull JsonElement) json.result);
+            }
+        }
+
+        private void callNotifyHandler(String method, JsonElement result) {
+            HandlerRef<?> ref = null;
+            synchronized (notifyHandlers) {
+                ref = notifyHandlers.get(method);
+            }
+            if (ref != null) {
+                ref.callHandler(result);
+            }
+        }
+
+        private void callResponseHandler(Integer id, JsonElement result) {
+            HandlerRef<?> ref = null;
+            synchronized (responseHandlers) {
+                ref = responseHandlers.remove(id);
+            }
+            if (ref != null) {
+                ref.callHandler(result);
+            }
+        }
+    }
+
+    /**
+     * @author Steffen Brandemann - Initial contribution
+     */
+    private class HandlerRef<T> {
+        private final Class<T> responseType;
+        private final Consumer<T> responseHandler;
+        private final @Nullable String id;
+
+        /**
+         * @param responseType Type of the response parameters
+         * @param responseHandler Handler for processing the response
+         */
+        private HandlerRef(Class<T> responseType, Consumer<T> responseHandler) {
+            this(responseType, responseHandler, null);
+        }
+
+        /**
+         * @param responseType Type of the response parameters
+         * @param responseHandler Handler for processing the response
+         * @param params
+         */
+        private HandlerRef(Class<T> responseType, Consumer<T> responseHandler, @Nullable Identifiable params) {
+            this.responseType = responseType;
+            this.responseHandler = responseHandler;
+            this.id = (params != null ? params.getId() : null);
+        }
+
+        /**
+         * Invoke the handler
+         *
+         * @param data Data for processing
+         */
+        private void callHandler(JsonElement data) {
+            T response = gson.fromJson(data, responseType);
+            if (response instanceof Identifiable) {
+                Identifiable im = (Identifiable) response;
+                if (im.getId() == null && this.id != null) {
+                    im.setId(this.id);
+                }
+            }
+            responseHandler.accept(response);
+        }
+    }
+
+    /**
+     * Data structure for incoming messages
+     *
+     * @author Steffen Brandemann - Initial contribution
+     */
     @SuppressWarnings("unused")
-    public Collection<Stream> getStreams() {
-        return Collections.unmodifiableCollection(streamMap.values());
+    private static class InputMessage {
+        private @Nullable Integer id;
+        private @Nullable String jsonrpc;
+        private @Nullable String method;
+        private @Nullable JsonElement params;
+        private @Nullable JsonElement result;
     }
 
-    public SnapcastClientController getClient(final String mac) {
-        return new SnapcastClientController(client, mac, clientMap, updateListeners);
-    }
-
-    public Collection<Client> getClients() {
-        return clientMap.values();
-    }
-
-    public Integer getProtocolVersion() {
-        return serverStatus.getServer().getSnapserver().getControlProtocolVersion();
-    }
-
+    /**
+     * Data structure for outgoing messages
+     *
+     * @author Steffen Brandemann - Initial contribution
+     */
     @SuppressWarnings("unused")
-    public void addUpdateListener(final SnapcastUpdateListener updateListener) {
-        updateListeners.add(updateListener);
+    private static class OutputMessage<T> {
+        private @Nullable Integer id;
+        private @Nullable String jsonrpc;
+        private @Nullable String method;
+        private @Nullable T params;
     }
 }

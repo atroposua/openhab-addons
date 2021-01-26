@@ -40,6 +40,7 @@ public class ADBHandlerFactory extends BaseThingHandlerFactory {
 
     @Override
     public boolean supportsThingType(ThingTypeUID thingTypeUID) {
+        logger.info("supportsThingType: " + thingTypeUID.getId());
         return SUPPORTED_THING_TYPES_UIDS.contains(thingTypeUID);
     }
 

@@ -1,56 +1,85 @@
-# snapcast Binding
+# Snapcast Binding
 
-_Give some details about what this binding is meant for - a protocol, system, specific device._
-
-_If possible, provide some resources like pictures, a YouTube video, etc. to give an impression of what can be done with this binding. You can place such resources into a `doc` folder next to this README.md._
+This binding integrates the [Snapcast](https://github.com/badaix/snapcast) multi-room audio player.
 
 ## Supported Things
 
-_Please describe the different supported things / devices within this section._
-_Which different types are supported, which models were tested etc.?_
-_Note that it is planned to generate some part of this based on the XML files within ```src/main/resources/OH-INF/thing``` of your binding._
+This binding supports Snapcast Servers and Clients. The Servers are used as bridge.
+
+Tested with Snapcast version 0.15.0.
 
 ## Discovery
 
-_Describe the available auto-discovery features here. Mention for what it works and what needs to be kept in mind when using it._
-
-## Binding Configuration
-
-_If your binding requires or supports general configuration settings, please create a folder ```cfg``` and place the configuration file ```<bindingId>.cfg``` inside it. In this section, you should link to this file and provide some information about the options. The file could e.g. look like:_
-
-```
-# Configuration for the Philips Hue Binding
-#
-# Default secret key for the pairing of the Philips Hue Bridge.
-# It has to be between 10-40 (alphanumeric) characters
-# This may be changed by the user for security reasons.
-secret=openHABSecret
-```
-
-_Note that it is planned to generate some part of this based on the information that is available within ```src/main/resources/OH-INF/binding``` of your binding._
-
-_If your binding does not offer any generic configurations, you can remove this section completely._
+The Snapcast Servers are discoverd through mDNS in the local network.
+Once it is added as a Thing, the Snapcast Server will discover connected Snapcast Clients autimatically.
 
 ## Thing Configuration
 
-_Describe what is needed to manually configure a thing, either through the (Paper) UI or via a thing-file. This should be mainly about its mandatory and optional configuration parameters. A short example entry for a thing file can help!_
+The Snapcast Server requires the ip address and port to access it on.
+The Snapcast Clients are identified by an ID.
+In the thing file, this looks e.g. like
 
-_Note that it is planned to generate some part of this based on the XML files within ```src/main/resources/OH-INF/thing``` of your binding._
+```
+Bridge snapcast:server:Snapcast [ host="192.168.0.42", port=1705 ]
+{
+    Thing client b827eb761cca[ id="b8:27:eb:76:1c:ca" ]
+}
+```
 
 ## Channels
 
-_Here you should provide information about available channel types, what their meaning is and how they can be used._
+The Snapcast Server support the following channels:
 
-_Note that it is planned to generate some part of this based on the XML files within ```src/main/resources/OH-INF/thing``` of your binding._
+| Channel Type ID         | Item Type | Description                                                                            |
+|-------------------------|-----------|----------------------------------------------------------------------------------------|
+| streams                 | String    | Get an comma-seperated list of all available streams                                   |
+| streamsPlaying          | String    | Get an comma-seperated list of all playing streams                                     |
+| streamsIdle             | String    | Get an comma-seperated list of all idle streams                                        |
 
-| channel  | type   | description                  |
-|----------|--------|------------------------------|
-| control  | Switch | This is the control channel  |
+
+The Snapcast Client support the following channels:
+
+| Channel Type ID         | Item Type | Description                                                                            |
+|-------------------------|-----------|----------------------------------------------------------------------------------------|
+| name                    | String    | Set or get the name of the client                                                      |
+| volume                  | Dimmer    | Set or get the volume of the client                                                    |
+| mute                    | Switch    | Set or get the mute state of the client                                                |
+| latency                 | Number    | Set or get the latency of the client                                                   |
+| stream                  | String    | Set or get the stream of the client                                                    |
+| streamStatus            | String    | Get the stream status (e.g. playing, idle)                                             |
+
 
 ## Full Example
 
-_Provide a full usage example based on textual configuration files (*.things, *.items, *.sitemap)._
+demo.things:
 
-## Any custom content here!
+```
+Bridge snapcast:server:Snapcast [ host="192.168.0.42", port=1705 ]
+{
+    Thing client b827eb761cca[ id="b8:27:eb:76:1c:ca" ]
+}
+```
 
-_Feel free to add additional sections for whatever you think should also be mentioned about your binding!_
+demo.items:
+
+```
+Group  Snapcast                            <player>
+Dimmer Snapclient1_Volume "Volume [%d %%]" <soundvolume>      (Snapcast) {channel="snapcast:client:Snapcast:b827eb761cca:volume"}
+Switch Snapclient1_Mute "Mute"             <soundvolume_mute> (Snapcast) {channel="snapcast:client:Snapcast:b827eb761cca:mute"}
+String Snapclient1_Stream "Stream"         <player>           (Snapcast) {channel="snapcast:client:Snapcast:b827eb761cca:stream"}
+String Snapclient1_Status "Status"         <switch>           (Snapcast) {channel="snapcast:client:Snapcast:b827eb761cca:streamStatus"}
+```
+
+demo.sitemap:
+
+```
+sitemap demo label="Main Menu"
+{
+    Frame label="Snapcast" {
+        Slider item=Snapclient1_Volume
+        Switch item=Snapclient1_Mute
+        Selection item=Snapclient1_Stream label="Stream" mappings=["Spotify"="Spotify", "Airplay"="Airplay"]
+        Text item=Snapclient1_Status label="Status [%s]"
+    }
+}
+```
